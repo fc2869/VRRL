@@ -1,0 +1,150 @@
+data:
+  # Vendored RL training set (also overridable via the launcher's DATA_ROOT / IMAGE_DIR).
+  train_files: data/FrozenLake/rl_train/rl_3k/hf_dataset@train
+  val_files:   data/FrozenLake/rl_train/rl_3k/hf_dataset@train
+  prompt_key: problem
+  answer_key: answer
+  image_key: images
+  video_key: videos
+  image_dir: data/FrozenLake/rl_train/rl_3k
+  video_fps: 2.0
+  max_prompt_length: 2000
+  max_response_length: 2200
+  rollout_batch_size: 16
+  mini_rollout_batch_size: null
+  val_batch_size: 1024
+  # Reflection format prompt -- VPRL Direct system prompt
+  format_prompt: EasyR1/training/format_prompt/frozenlake_reflection.jinja
+  override_chat_template: null
+  shuffle: true
+  seed: 2025
+  min_pixels: null
+  max_pixels: 1254400
+  filter_overlong_prompts: true
+  use_multi_turn: true
+  max_turns: 5
+  single_turn_response_length: 512
+
+algorithm:
+  adv_estimator: grpo
+  disable_kl: false
+  use_kl_loss: true
+  kl_penalty: low_var_kl
+  kl_coef: 1.0e-2
+  online_filtering: false
+  filter_key: overall
+  filter_low: 0.01
+  filter_high: 0.99
+
+worker:
+  actor:
+    global_batch_size: 32
+    micro_batch_size_per_device_for_update: 2
+    micro_batch_size_per_device_for_experience: 8
+    max_grad_norm: 1.0
+    padding_free: true
+    dynamic_batching: true
+    ulysses_size: 1
+    model:
+      # Multi-turn SFT base to start RL from (overridden by the launcher's MODEL_PATH).
+      model_path: checkpoints/VRRL_multi_sft_qwen3_frozenlake
+      enable_gradient_checkpointing: true
+      trust_remote_code: false
+      freeze_vision_tower: false
+    optim:
+      lr: 1.0e-6
+      weight_decay: 1.0e-2
+      strategy: adamw_bf16
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+      torch_dtype: bf16
+    offload:
+      offload_params: true
+      offload_optimizer: true
+
+  rollout:
+    name: frozenlake_multi_turn
+    # Tells the rollout parser + feedback-prompt injector to use the reflection
+    # format (<ANSWER>/<FINAL> with <THINK> on revision turns).
+    fmt: reflection_tag
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    limit_images: 0
+    gpu_memory_utilization: 0.6
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 1
+    disable_tqdm: false
+    max_turns: 5
+    num_llm_calls_available: 5
+    single_turn_response_length: 512
+    # When set, each generate_sequences call writes a per-batch subdir with the
+    # rendered feedback PNGs + transcripts.jsonl for offline inspection.
+    temp_dir: outputs/rollouts
+    val_override_config:
+      n: 1
+      temperature: 0.0
+    # --- Prefix buffer + random restart (defaults all-off; opt in via CLI) ---
+    per_question_mode_selection: false
+    normal_mode_weight: 1.0
+    random_start_mode_weight: 0.0
+    prefix_buffer_mode_weight: 0.0
+    random_start_turn_min: 1
+    random_start_mask_all_until_final: false
+    prefix_buffer_size: 1000
+    prefix_buffer_wrong_ratio: 0.8
+    prefix_buffer_max_staleness_steps: 100
+    prefix_buffer_min_size: 32
+    prefix_buffer_max_per_question: 3
+    prefix_buffer_force_pointing: true
+    prefix_buffer_recycle: false
+    prefix_buffer_max_pointing_turns: 4
+    prefix_buffer_correct_replay: false
+
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: true
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+
+  reward:
+    reward_type: batch
+    reward_function: EasyR1/training/reward_function/frozenlake_score.py:compute_score
+    reward_function_kwargs:
+      lambda_deg: 1.0
+      reflect_weight: 0.9
+      log_filename: outputs/rewards.jsonl
+      min_turns: 1
+      correct_value: 1.0
+      # Match the rollout-side fmt so the format reward applies the
+      # reflection-format structural checks (<THINK> required on revision turns,
+      # <FINAL> no-THINK, etc.).
+      fmt: reflection_tag
+    skip_special_tokens: false
+    num_cpus: 1
+
+trainer:
+  total_epochs: 3
+  max_steps: null
+  project_name: VisualReasonFrozenLake
+  experiment_name: frozenlake_multi_turn_grpo_reflection
+  logger: ["console", "wandb"]
+  nnodes: 1
+  n_gpus_per_node: 6
+  max_try_make_batch: 20
+  val_freq: -1
+  val_before_train: false
+  val_only: false
+  val_generations_to_log: 3
+  save_freq: 20
+  save_limit: 2
+  save_model_only: true
+  save_checkpoint_path: null
+  load_checkpoint_path: null
+  find_last_checkpoint: true
